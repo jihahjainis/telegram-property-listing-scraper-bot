@@ -4,7 +4,8 @@ Telegram tools for finding rental listing messages, forwarding matches into a ta
 
 ## Features
 
-- Runs as a Telegram bot with the `/rent` command.
+- Runs as a Telegram bot that listens live for new listings in configured folders and forwards them as they arrive.
+- Also supports the `/rent` command for an on-demand backfill search over recent messages.
 - Searches configured Telegram folders or fallback groups.
 - Filters messages by include and exclude keywords.
 - Skips unavailable listings based on status keywords.
@@ -55,7 +56,9 @@ Run the Telegram bot:
 python bot.py
 ```
 
-In Telegram, send `/rent` to the bot from an allowed user account.
+The bot listens live for new listings in the default source folders and forwards matches to the default target group automatically.
+
+In Telegram, send `/rent` to the bot from an allowed user account to also run a manual backfill search over recent messages with custom folders/keywords/target group.
 
 Run the interactive scraper directly:
 

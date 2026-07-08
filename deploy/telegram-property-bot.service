@@ -1,0 +1,15 @@
+[Unit]
+Description=Telegram Property Scraper Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=REPLACE_WITH_VPS_USER
+WorkingDirectory=/opt/telegram-property-scraper_bot
+ExecStart=/opt/telegram-property-scraper_bot/venv/bin/python bot.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

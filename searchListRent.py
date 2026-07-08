@@ -4,8 +4,9 @@ import os
 import re
 import unicodedata
 
-from telethon import TelegramClient, functions, utils
+from telethon import TelegramClient, events, functions, utils
 from extract_listing import extract_listing_fields
+from listing_api import submit_listing
 from listing_excel import append_listing_row, EXCEL_PATH
 from telegram_config import get_telegram_config, load_env_file
 
@@ -41,8 +42,7 @@ UNAVAILABLE_KEYWORDS = [
 ]
 
 TELEGRAM_SOURCE_FOLDERS = [
-    'Lister Group',
-    'Lister Indi'
+    'One Group'
 ]
 
 # Used only when no source folders are entered or configured.
@@ -995,12 +995,21 @@ async def forward_property_messages(
             )
             print(f"✅ Sent to {target_group_name}")
 
+        listing_fields = None
+
         try:
             listing_fields = extract_listing_fields(get_message_text(message))
-            append_listing_row(listing_fields, build_message_link(chat, message))
-            print(f"📊 Logged to {EXCEL_PATH.name}")
         except Exception as error:
-            print(f"Could not log listing to Excel: {error}")
+            print(f"Could not extract listing fields: {error}")
+
+        if listing_fields is not None:
+            try:
+                append_listing_row(listing_fields, build_message_link(chat, message))
+                print(f"📊 Logged to {EXCEL_PATH.name}")
+            except Exception as error:
+                print(f"Could not log listing to Excel: {error}")
+
+            submit_listing(listing_fields, get_message_text(message), build_message_link(chat, message))
 
         processed_messages.add(unique_id)
         if listing_content_key is not None:
@@ -1015,6 +1024,195 @@ async def forward_property_messages(
     print(f'\nForwarded {forwarded_count} matching messages to {target_groups_str}.')
 
     return forwarded_count
+
+
+# Live-mode dedup state (persists for the lifetime of the process).
+live_processed_listing_content_keys = {}
+live_forwarded_forward_origins = {}
+
+
+async def handle_live_message(
+    event,
+    target_groups,
+    target_group_names,
+    keywords,
+    extra_filters,
+    exclude_filters,
+    log=print,
+):
+    message = event.message
+    chat = await event.get_chat()
+    chat_name = str(get_title(chat))
+
+    if not get_message_text(message):
+        return
+
+    unique_id = f"{chat_name}_{message.id}"
+
+    if unique_id in processed_messages:
+        return
+
+    skip_reason, matched_value = get_skip_reason(message, exclude_filters)
+
+    if skip_reason:
+        log(
+            f'Skipping message {message.id} from "{chat_name}" '
+            f'because it is {skip_reason} and contains "{matched_value}".'
+        )
+        processed_messages.add(unique_id)
+        return
+
+    if not has_keyword(message, keywords):
+        return
+
+    if not has_extra_filter(message, extra_filters):
+        return
+
+    listing_content_key = get_listing_content_key(message)
+
+    if listing_content_key is not None:
+        previous_item = live_processed_listing_content_keys.get(listing_content_key)
+
+        if previous_item is not None:
+            log(
+                f'Skipping duplicate listing text in message {message.id} '
+                f'from "{chat_name}" because message {previous_item["message"].id} '
+                f'from "{previous_item["chat_name"]}" already handled the same '
+                'listing content.'
+            )
+            processed_messages.add(unique_id)
+            return
+
+    forward_origin_key = get_forward_origin_key(message)
+
+    if forward_origin_key is not None:
+        previous_item = live_forwarded_forward_origins.get(forward_origin_key)
+
+        if previous_item is not None:
+            log(
+                f'Skipping duplicate forwarded message {message.id} '
+                f'from "{chat_name}" because message {previous_item["message"].id} '
+                f'from "{previous_item["chat_name"]}" used the same Telegram '
+                'forward origin.'
+            )
+            processed_messages.add(unique_id)
+            return
+
+    log('\n===================')
+    log('PROPERTY FOUND (live)')
+    log('===================')
+    log(f'Date: {message.date}')
+    log(f'Chat: {chat_name}')
+    log(get_message_text(message))
+
+    for target_group, target_group_name in zip(target_groups, target_group_names):
+        await client.forward_messages(target_group, message)
+        log(f'✅ Sent to {target_group_name}')
+
+    listing_fields = None
+
+    try:
+        listing_fields = extract_listing_fields(get_message_text(message))
+    except Exception as error:
+        log(f'Could not extract listing fields: {error}')
+
+    if listing_fields is not None:
+        try:
+            append_listing_row(listing_fields, build_message_link(chat, message))
+            log(f'📊 Logged to {EXCEL_PATH.name}')
+        except Exception as error:
+            log(f'Could not log listing to Excel: {error}')
+
+        submit_listing(listing_fields, get_message_text(message), build_message_link(chat, message), log=log)
+
+    processed_messages.add(unique_id)
+    item = {'chat_name': chat_name, 'message': message}
+
+    if listing_content_key is not None:
+        live_processed_listing_content_keys[listing_content_key] = item
+
+    if forward_origin_key is not None:
+        live_forwarded_forward_origins[forward_origin_key] = item
+
+
+async def start_live_listener(
+    source_folders=None,
+    keywords=None,
+    extra_filters=None,
+    exclude_filters=None,
+    target_group_names=None,
+    log=print,
+):
+    if source_folders is None:
+        source_folders = DEFAULT_SOURCE_FOLDERS[:]
+    if keywords is None:
+        keywords = DEFAULT_KEYWORDS[:]
+    if extra_filters is None:
+        extra_filters = []
+    if exclude_filters is None:
+        exclude_filters = []
+    if target_group_names is None:
+        target_group_names = [TARGET_GROUP]
+
+    target_groups = []
+    for name in target_group_names:
+        try:
+            target_groups.append(await resolve_chat(name))
+        except ValueError as error:
+            log(str(error))
+            return None
+
+    target_group_ids = {get_peer_id(tg) for tg in target_groups}
+    chats = []
+
+    if source_folders:
+        dialogs_by_id = {}
+
+        for folder_name in source_folders:
+            try:
+                dialogs = await get_folder_dialogs(folder_name)
+            except ValueError as error:
+                log(str(error))
+                continue
+
+            for dialog in dialogs:
+                peer_id = get_peer_id(dialog.entity)
+
+                if peer_id is not None:
+                    dialogs_by_id[peer_id] = dialog
+
+        chats = [dialog.entity for dialog in dialogs_by_id.values()]
+    else:
+        for group_name in GROUP_NAMES:
+            try:
+                chats.append(await resolve_chat(group_name))
+            except ValueError as error:
+                log(str(error))
+
+    chats = [chat for chat in chats if get_peer_id(chat) not in target_group_ids]
+
+    log(
+        f'Live-listening on {len(chats)} chat(s) for source folder(s) '
+        f'{", ".join(source_folders) if source_folders else ", ".join(GROUP_NAMES)}.'
+    )
+    log(f'Keywords: {", ".join(keywords)}')
+
+    @client.on(events.NewMessage(chats=chats))
+    async def _on_new_message(event):
+        try:
+            await handle_live_message(
+                event,
+                target_groups,
+                target_group_names,
+                keywords,
+                extra_filters,
+                exclude_filters,
+                log=log,
+            )
+        except Exception as error:
+            log(f'Error handling live message {event.message.id}: {error}')
+
+    return _on_new_message
 
 
 async def main():

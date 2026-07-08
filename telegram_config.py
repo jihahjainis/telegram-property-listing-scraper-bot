@@ -71,3 +71,12 @@ def get_bot_config():
         raise RuntimeError('TELEGRAM_ALLOWED_USERS must contain at least one numeric user ID')
 
     return bot_token, allowed_user_ids
+
+
+def get_therooma_config():
+    load_env_file()
+
+    api_url = os.environ.get('THEROOMA_API_URL', '').strip()
+    api_key = os.environ.get('THEROOMA_API_KEY', '').strip()
+
+    return api_url, api_key

@@ -165,12 +165,15 @@ async def main():
     reset_listings_file()
 
     async with rent.client:
+        await rent.start_live_listener()
+
         application = build_application()
 
         async with application:
             await application.start()
             await application.updater.start_polling()
-            print('Bot is running. Send /rent in Telegram to start a search.')
+            print('Bot is running. Listening live for new listings.')
+            print('Send /rent in Telegram to also run a manual backfill search.')
 
             try:
                 await asyncio.Event().wait()
