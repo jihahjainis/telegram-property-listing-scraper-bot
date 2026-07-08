@@ -44,7 +44,8 @@ UNAVAILABLE_KEYWORDS = [
 ]
 
 TELEGRAM_SOURCE_FOLDERS = [
-    'One Group'
+    'Lister Group',
+    'Lister Indi'
 ]
 
 # Used only when no source folders are entered or configured.
@@ -1373,6 +1374,8 @@ async def run(
 async def run_quick_search(
     source_folders=None,
     keywords=None,
+    extra_filters=None,
+    exclude_filters=None,
     target_group_name=None,
     log=print,
 ):
@@ -1380,6 +1383,10 @@ async def run_quick_search(
         source_folders = DEFAULT_SOURCE_FOLDERS[:]
     if keywords is None:
         keywords = QUICK_SEARCH_KEYWORDS[:]
+    if extra_filters is None:
+        extra_filters = []
+    if exclude_filters is None:
+        exclude_filters = []
     if target_group_name is None:
         target_group_name = QUICK_SEARCH_TARGET_GROUP
 
@@ -1404,13 +1411,16 @@ async def run_quick_search(
         if unique_id in quick_search_processed_messages:
             continue
 
-        skip_reason, matched_value = get_skip_reason(message)
+        skip_reason, matched_value = get_skip_reason(message, exclude_filters)
 
         if skip_reason:
             mark_quick_search_processed(unique_id)
             continue
 
         if not has_keyword(message, keywords):
+            continue
+
+        if not has_extra_filter(message, extra_filters):
             continue
 
         await client.forward_messages(target_group, message)

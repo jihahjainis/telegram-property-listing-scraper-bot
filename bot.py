@@ -17,6 +17,7 @@ from telegram_config import get_bot_config
 BOT_TOKEN, ALLOWED_USER_IDS = get_bot_config()
 
 FOLDER, KEYWORDS, EXTRA_FILTERS, EXCLUDE_FILTERS, TARGET_GROUP = range(5)
+SEARCH_FOLDER, SEARCH_KEYWORDS, SEARCH_EXTRA_FILTERS, SEARCH_EXCLUDE_FILTERS, SEARCH_TARGET_GROUP = range(5, 10)
 
 SKIP = '/x'
 STEP_FILTER = filters.Regex(rf'^{SKIP}$') | (filters.TEXT & ~filters.COMMAND)
@@ -163,13 +164,94 @@ async def startlive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await rent.start_live_listener(log=_chat_logger(context, update.effective_chat.id))
 
 
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def search_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     if not _is_allowed(update):
         await update.message.reply_text('Not authorized.')
-        return
+        return ConversationHandler.END
 
-    await update.message.reply_text('Running quick search, this may take a moment...')
-    await rent.run_quick_search(log=_chat_logger(context, update.effective_chat.id))
+    default_text = ', '.join(rent.DEFAULT_SOURCE_FOLDERS)
+    await update.message.reply_text(
+        f'Enter folder name(s), comma separated ({SKIP} for {default_text}):'
+    )
+    return SEARCH_FOLDER
+
+
+async def search_folder(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    source_folders = rent.resolve_source_folders(_value_or_skip(update.message.text))
+    context.chat_data['search_source_folders'] = source_folders
+
+    if source_folders:
+        await update.message.reply_text(f'Searching folders: {", ".join(source_folders)}')
+    else:
+        await update.message.reply_text(
+            f'Searching fallback groups: {", ".join(rent.GROUP_NAMES)}'
+        )
+
+    default_text = ', '.join(rent.QUICK_SEARCH_KEYWORDS)
+    await update.message.reply_text(
+        f'Keywords, comma separated ({SKIP} for {default_text}):'
+    )
+    return SEARCH_KEYWORDS
+
+
+async def search_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = _value_or_skip(update.message.text).strip()
+    keywords = rent.parse_comma_separated_values(text) if text else rent.QUICK_SEARCH_KEYWORDS[:]
+    context.chat_data['search_keywords'] = keywords
+
+    await update.message.reply_text(f'Filtering messages by keywords: {", ".join(keywords)}')
+    await update.message.reply_text(f'Extra keywords a message must also contain ({SKIP} to skip):')
+    return SEARCH_EXTRA_FILTERS
+
+
+async def search_extra_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    extra_filters = rent.parse_comma_separated_values(_value_or_skip(update.message.text))
+    context.chat_data['search_extra_filters'] = extra_filters
+
+    if extra_filters:
+        await update.message.reply_text(
+            f'Only forwarding messages that also contain: {", ".join(extra_filters)}'
+        )
+
+    await update.message.reply_text(f'Keywords to exclude messages containing ({SKIP} to skip):')
+    return SEARCH_EXCLUDE_FILTERS
+
+
+async def search_exclude_filters(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    exclude_filters = rent.parse_comma_separated_values(_value_or_skip(update.message.text))
+    context.chat_data['search_exclude_filters'] = exclude_filters
+
+    if exclude_filters:
+        await update.message.reply_text(f'Skipping messages that contain: {", ".join(exclude_filters)}')
+
+    await update.message.reply_text(
+        f'Target group to forward to ({SKIP} for "{rent.QUICK_SEARCH_TARGET_GROUP}"):'
+    )
+    return SEARCH_TARGET_GROUP
+
+
+async def search_target_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    text = update.message.text.strip()
+
+    if text != SKIP and ',' in text:
+        await update.message.reply_text('Please enter only one target group.')
+        return SEARCH_TARGET_GROUP
+
+    target_group_name = _value_or_skip(text).strip() or rent.QUICK_SEARCH_TARGET_GROUP
+    await update.message.reply_text(
+        f'Forwarding to "{target_group_name}". Running quick search, this may take a moment...'
+    )
+
+    await rent.run_quick_search(
+        source_folders=context.chat_data['search_source_folders'],
+        keywords=context.chat_data['search_keywords'],
+        extra_filters=context.chat_data['search_extra_filters'],
+        exclude_filters=context.chat_data['search_exclude_filters'],
+        target_group_name=target_group_name,
+        log=_chat_logger(context, update.effective_chat.id),
+    )
+
+    return ConversationHandler.END
 
 
 def build_application() -> Application:
@@ -187,10 +269,22 @@ def build_application() -> Application:
         fallbacks=[CommandHandler('cancel', rent_cancel)],
     )
 
+    search_conversation = ConversationHandler(
+        entry_points=[CommandHandler('search', search_start)],
+        states={
+            SEARCH_FOLDER: [MessageHandler(STEP_FILTER, search_folder)],
+            SEARCH_KEYWORDS: [MessageHandler(STEP_FILTER, search_keywords)],
+            SEARCH_EXTRA_FILTERS: [MessageHandler(STEP_FILTER, search_extra_filters)],
+            SEARCH_EXCLUDE_FILTERS: [MessageHandler(STEP_FILTER, search_exclude_filters)],
+            SEARCH_TARGET_GROUP: [MessageHandler(STEP_FILTER, search_target_group)],
+        },
+        fallbacks=[CommandHandler('cancel', rent_cancel)],
+    )
+
     application.add_handler(conversation)
+    application.add_handler(search_conversation)
     application.add_handler(CommandHandler('stoplive', stoplive))
     application.add_handler(CommandHandler('startlive', startlive))
-    application.add_handler(CommandHandler('search', search))
     return application
 
 
