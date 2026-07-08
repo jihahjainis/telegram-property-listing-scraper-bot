@@ -37,7 +37,9 @@ def _build_payload(fields, message_text, message_link):
         'contactName': fields.get('contact_name'),
         'contactPhone': fields.get('contact_phone'),
         'telegramMessageUrl': message_link,
-        'status': 'active',
+        'sourceTelegramUrl': fields.get('listing_url'),
+        'acceptForeigners': fields.get('open_to_foreigners'),
+        'status': 'inactive',
     }
 
 

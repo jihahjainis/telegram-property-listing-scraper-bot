@@ -1,8 +1,10 @@
 from difflib import get_close_matches
 import hashlib
+import json
 import os
 import re
 import unicodedata
+from pathlib import Path
 
 from telethon import TelegramClient, events, functions, utils
 from extract_listing import extract_listing_fields
@@ -53,8 +55,71 @@ GROUP_NAMES = [
 # Your personal Telegram group
 TARGET_GROUP = 'Property Leads'
 
-# Prevent duplicate forwarding
+# Used by /search: a lighter one-shot scan that just forwards matches,
+# without AI extraction, Excel logging, or DB sync.
+QUICK_SEARCH_KEYWORDS = ['for rent', 'rental']
+QUICK_SEARCH_TARGET_GROUP = 'Jihah Listings'
+
+# Prevent duplicate forwarding / re-extraction. Persisted to disk so restarting
+# the bot doesn't forget what it already processed and re-run (and re-charge
+# Claude for) listings it already handled in a prior run.
+STATE_PATH = Path(__file__).with_name('processed_state.json')
+
 processed_messages = set()
+processed_content_keys = set()
+processed_forward_origins = set()
+
+# Separate dedup track for /search, so a message already handled by the main
+# pipeline still gets independently forwarded here too (different keyword set,
+# different target group, no AI/DB involvement).
+quick_search_processed_messages = set()
+
+
+def _serialize_forward_origin_key(key):
+    return '|'.join(str(part) for part in key)
+
+
+def load_processed_state(path=STATE_PATH):
+    if not path.exists():
+        return
+
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        print(f'Could not load {path.name}: {error}')
+        return
+
+    processed_messages.update(data.get('processed_messages', []))
+    processed_content_keys.update(data.get('content_keys', []))
+    processed_forward_origins.update(data.get('forward_origins', []))
+    quick_search_processed_messages.update(data.get('quick_search_processed_messages', []))
+
+
+def save_processed_state(path=STATE_PATH):
+    data = {
+        'processed_messages': sorted(processed_messages),
+        'content_keys': sorted(processed_content_keys),
+        'forward_origins': sorted(processed_forward_origins),
+        'quick_search_processed_messages': sorted(quick_search_processed_messages),
+    }
+
+    try:
+        path.write_text(json.dumps(data))
+    except OSError as error:
+        print(f'Could not save {path.name}: {error}')
+
+
+def mark_processed(unique_id):
+    processed_messages.add(unique_id)
+    save_processed_state()
+
+
+def mark_quick_search_processed(unique_id):
+    quick_search_processed_messages.add(unique_id)
+    save_processed_state()
+
+
+load_processed_state()
 
 # Telegram accepts batches for message deletion.
 DELETE_BATCH_SIZE = 200
@@ -457,6 +522,11 @@ def get_link_keys_from_message(message):
     return keys
 
 
+def get_source_telegram_link(message):
+    match = TELEGRAM_MESSAGE_LINK_RE.search(get_message_text(message))
+    return match.group(0) if match else None
+
+
 def get_forward_origin_key(message):
     fwd_from = getattr(message, 'fwd_from', None)
 
@@ -821,9 +891,6 @@ async def forward_property_messages(
         messages,
         status_replies_by_listing
     )
-    forwarded_forward_origins = {}
-    processed_listing_content_keys = {}
-
     if unavailable_forward_origins:
         print(
             f'Found {len(unavailable_forward_origins)} unavailable '
@@ -854,7 +921,7 @@ async def forward_property_messages(
                 f'Skipping message {message.id} from "{chat_name}" '
                 f'because it is {skip_reason} and contains "{matched_value}".'
             )
-            processed_messages.add(unique_id)
+            mark_processed(unique_id)
             continue
 
         if not has_keyword(message, keywords):
@@ -865,21 +932,14 @@ async def forward_property_messages(
 
         listing_content_key = get_listing_content_key(message)
 
-        if listing_content_key is not None:
-            previous_item = processed_listing_content_keys.get(listing_content_key)
-
-            if previous_item is not None:
-                previous_message = previous_item['message']
-                previous_chat_name = previous_item['chat_name']
-
-                print(
-                    f'Skipping duplicate listing text in message {message.id} '
-                    f'from "{chat_name}" because message {previous_message.id} '
-                    f'from "{previous_chat_name}" already handled the same '
-                    'listing content.'
-                )
-                processed_messages.add(unique_id)
-                continue
+        if listing_content_key is not None and listing_content_key in processed_content_keys:
+            print(
+                f'Skipping duplicate listing text in message {message.id} '
+                f'from "{chat_name}" because this listing content was already '
+                'handled in a prior run.'
+            )
+            mark_processed(unique_id)
+            continue
 
         unavailable_link_match = get_unavailable_link_match(
             message,
@@ -898,9 +958,9 @@ async def forward_property_messages(
                 f'({unavailable_link_match["reason"]}).'
             )
             if listing_content_key is not None:
-                processed_listing_content_keys[listing_content_key] = item
+                processed_content_keys.add(listing_content_key)
 
-            processed_messages.add(unique_id)
+            mark_processed(unique_id)
             continue
 
         if forward_origin_key is not None:
@@ -918,24 +978,18 @@ async def forward_property_messages(
                     f'{unavailable_origin["reason"]}.'
                 )
                 if listing_content_key is not None:
-                    processed_listing_content_keys[listing_content_key] = item
+                    processed_content_keys.add(listing_content_key)
 
-                processed_messages.add(unique_id)
+                mark_processed(unique_id)
                 continue
 
-            previous_item = forwarded_forward_origins.get(forward_origin_key)
-
-            if previous_item is not None:
-                previous_message = previous_item['message']
-                previous_chat_name = previous_item['chat_name']
-
+            if _serialize_forward_origin_key(forward_origin_key) in processed_forward_origins:
                 print(
                     f'Skipping duplicate forwarded message {message.id} '
-                    f'from "{chat_name}" because message {previous_message.id} '
-                    f'from "{previous_chat_name}" used the same Telegram '
-                    'forward origin.'
+                    f'from "{chat_name}" because this Telegram forward origin '
+                    'was already handled in a prior run.'
                 )
-                processed_messages.add(unique_id)
+                mark_processed(unique_id)
                 continue
 
         skip_reason, matched_value = get_skip_reason(message, exclude_filters)
@@ -946,9 +1000,9 @@ async def forward_property_messages(
                 f'because it is {skip_reason} and contains "{matched_value}".'
             )
             if listing_content_key is not None:
-                processed_listing_content_keys[listing_content_key] = item
+                processed_content_keys.add(listing_content_key)
 
-            processed_messages.add(unique_id)
+            mark_processed(unique_id)
             continue
 
         reply_count = get_reply_count(message)
@@ -974,9 +1028,9 @@ async def forward_property_messages(
 
             print("STATUS: NOT AVAILABLE")
             if listing_content_key is not None:
-                processed_listing_content_keys[listing_content_key] = item
+                processed_content_keys.add(listing_content_key)
 
-            processed_messages.add(unique_id)
+            mark_processed(unique_id)
             continue
 
         print("\n===================")
@@ -1003,6 +1057,8 @@ async def forward_property_messages(
             print(f"Could not extract listing fields: {error}")
 
         if listing_fields is not None:
+            listing_fields['source_telegram_url'] = get_source_telegram_link(message)
+
             try:
                 append_listing_row(listing_fields, build_message_link(chat, message))
                 print(f"📊 Logged to {EXCEL_PATH.name}")
@@ -1011,24 +1067,19 @@ async def forward_property_messages(
 
             submit_listing(listing_fields, get_message_text(message), build_message_link(chat, message))
 
-        processed_messages.add(unique_id)
         if listing_content_key is not None:
-            processed_listing_content_keys[listing_content_key] = item
+            processed_content_keys.add(listing_content_key)
 
         if forward_origin_key is not None:
-            forwarded_forward_origins[forward_origin_key] = item
+            processed_forward_origins.add(_serialize_forward_origin_key(forward_origin_key))
 
+        mark_processed(unique_id)
         forwarded_count += 1
 
     target_groups_str = ", ".join(f'"{name}"' for name in target_group_names)
     print(f'\nForwarded {forwarded_count} matching messages to {target_groups_str}.')
 
     return forwarded_count
-
-
-# Live-mode dedup state (persists for the lifetime of the process).
-live_processed_listing_content_keys = {}
-live_forwarded_forward_origins = {}
 
 
 async def handle_live_message(
@@ -1059,7 +1110,7 @@ async def handle_live_message(
             f'Skipping message {message.id} from "{chat_name}" '
             f'because it is {skip_reason} and contains "{matched_value}".'
         )
-        processed_messages.add(unique_id)
+        mark_processed(unique_id)
         return
 
     if not has_keyword(message, keywords):
@@ -1070,33 +1121,25 @@ async def handle_live_message(
 
     listing_content_key = get_listing_content_key(message)
 
-    if listing_content_key is not None:
-        previous_item = live_processed_listing_content_keys.get(listing_content_key)
-
-        if previous_item is not None:
-            log(
-                f'Skipping duplicate listing text in message {message.id} '
-                f'from "{chat_name}" because message {previous_item["message"].id} '
-                f'from "{previous_item["chat_name"]}" already handled the same '
-                'listing content.'
-            )
-            processed_messages.add(unique_id)
-            return
+    if listing_content_key is not None and listing_content_key in processed_content_keys:
+        log(
+            f'Skipping duplicate listing text in message {message.id} '
+            f'from "{chat_name}" because this listing content was already '
+            'handled in a prior run.'
+        )
+        mark_processed(unique_id)
+        return
 
     forward_origin_key = get_forward_origin_key(message)
 
-    if forward_origin_key is not None:
-        previous_item = live_forwarded_forward_origins.get(forward_origin_key)
-
-        if previous_item is not None:
-            log(
-                f'Skipping duplicate forwarded message {message.id} '
-                f'from "{chat_name}" because message {previous_item["message"].id} '
-                f'from "{previous_item["chat_name"]}" used the same Telegram '
-                'forward origin.'
-            )
-            processed_messages.add(unique_id)
-            return
+    if forward_origin_key is not None and _serialize_forward_origin_key(forward_origin_key) in processed_forward_origins:
+        log(
+            f'Skipping duplicate forwarded message {message.id} '
+            f'from "{chat_name}" because this Telegram forward origin was '
+            'already handled in a prior run.'
+        )
+        mark_processed(unique_id)
+        return
 
     log('\n===================')
     log('PROPERTY FOUND (live)')
@@ -1117,6 +1160,8 @@ async def handle_live_message(
         log(f'Could not extract listing fields: {error}')
 
     if listing_fields is not None:
+        listing_fields['source_telegram_url'] = get_source_telegram_link(message)
+
         try:
             append_listing_row(listing_fields, build_message_link(chat, message))
             log(f'📊 Logged to {EXCEL_PATH.name}')
@@ -1125,14 +1170,29 @@ async def handle_live_message(
 
         submit_listing(listing_fields, get_message_text(message), build_message_link(chat, message), log=log)
 
-    processed_messages.add(unique_id)
-    item = {'chat_name': chat_name, 'message': message}
-
     if listing_content_key is not None:
-        live_processed_listing_content_keys[listing_content_key] = item
+        processed_content_keys.add(listing_content_key)
 
     if forward_origin_key is not None:
-        live_forwarded_forward_origins[forward_origin_key] = item
+        processed_forward_origins.add(_serialize_forward_origin_key(forward_origin_key))
+
+    mark_processed(unique_id)
+
+
+_live_handler = None
+
+
+async def stop_live_listener(log=print):
+    global _live_handler
+
+    if _live_handler is None:
+        log('Live listener is not currently running.')
+        return False
+
+    client.remove_event_handler(_live_handler)
+    _live_handler = None
+    log('Live listener stopped. Only /rent will run searches now.')
+    return True
 
 
 async def start_live_listener(
@@ -1143,6 +1203,12 @@ async def start_live_listener(
     target_group_names=None,
     log=print,
 ):
+    global _live_handler
+
+    if _live_handler is not None:
+        log('Live listener is already running.')
+        return _live_handler
+
     if source_folders is None:
         source_folders = DEFAULT_SOURCE_FOLDERS[:]
     if keywords is None:
@@ -1212,7 +1278,8 @@ async def start_live_listener(
         except Exception as error:
             log(f'Error handling live message {event.message.id}: {error}')
 
-    return _on_new_message
+    _live_handler = _on_new_message
+    return _live_handler
 
 
 async def main():
@@ -1301,6 +1368,57 @@ async def run(
 
     target_groups_str = ", ".join(f'"{name}"' for name in target_group_names)
     log(f'Forwarded {forwarded_count} matching messages to {target_groups_str}.')
+
+
+async def run_quick_search(
+    source_folders=None,
+    keywords=None,
+    target_group_name=None,
+    log=print,
+):
+    if source_folders is None:
+        source_folders = DEFAULT_SOURCE_FOLDERS[:]
+    if keywords is None:
+        keywords = QUICK_SEARCH_KEYWORDS[:]
+    if target_group_name is None:
+        target_group_name = QUICK_SEARCH_TARGET_GROUP
+
+    log(f'Quick search folders: {", ".join(source_folders) if source_folders else ", ".join(GROUP_NAMES)}')
+    log(f'Quick search keywords: {", ".join(keywords)}')
+
+    try:
+        target_group = await resolve_chat(target_group_name)
+    except ValueError as error:
+        log(str(error))
+        return
+
+    messages = await collect_all_messages([target_group], source_folders)
+
+    forwarded_count = 0
+
+    for item in messages:
+        chat_name = item['chat_name']
+        message = item['message']
+        unique_id = f"{chat_name}_{message.id}"
+
+        if unique_id in quick_search_processed_messages:
+            continue
+
+        skip_reason, matched_value = get_skip_reason(message)
+
+        if skip_reason:
+            mark_quick_search_processed(unique_id)
+            continue
+
+        if not has_keyword(message, keywords):
+            continue
+
+        await client.forward_messages(target_group, message)
+        log(f'✅ Sent to {target_group_name}: message {message.id} from "{chat_name}"')
+        mark_quick_search_processed(unique_id)
+        forwarded_count += 1
+
+    log(f'Quick search forwarded {forwarded_count} matching message(s) to "{target_group_name}".')
 
 
 if __name__ == '__main__':

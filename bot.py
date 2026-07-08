@@ -108,11 +108,7 @@ async def rent_target_group(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     )
 
     chat_id = update.effective_chat.id
-
-    def log(message):
-        context.application.create_task(
-            context.bot.send_message(chat_id=chat_id, text=str(message))
-        )
+    log = _chat_logger(context, chat_id)
 
     try:
         await rent.run(
@@ -142,6 +138,40 @@ async def rent_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
     return ConversationHandler.END
 
 
+def _chat_logger(context: ContextTypes.DEFAULT_TYPE, chat_id: int):
+    def log(message):
+        context.application.create_task(
+            context.bot.send_message(chat_id=chat_id, text=str(message))
+        )
+
+    return log
+
+
+async def stoplive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text('Not authorized.')
+        return
+
+    await rent.stop_live_listener(log=_chat_logger(context, update.effective_chat.id))
+
+
+async def startlive(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text('Not authorized.')
+        return
+
+    await rent.start_live_listener(log=_chat_logger(context, update.effective_chat.id))
+
+
+async def search(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not _is_allowed(update):
+        await update.message.reply_text('Not authorized.')
+        return
+
+    await update.message.reply_text('Running quick search, this may take a moment...')
+    await rent.run_quick_search(log=_chat_logger(context, update.effective_chat.id))
+
+
 def build_application() -> Application:
     application = Application.builder().token(BOT_TOKEN).build()
 
@@ -158,6 +188,9 @@ def build_application() -> Application:
     )
 
     application.add_handler(conversation)
+    application.add_handler(CommandHandler('stoplive', stoplive))
+    application.add_handler(CommandHandler('startlive', startlive))
+    application.add_handler(CommandHandler('search', search))
     return application
 
 

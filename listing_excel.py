@@ -16,6 +16,8 @@ HEADERS = [
     'Parking',
     'Price sorting',
     'Message Link',
+    'Listing URL',
+    'Open to Foreigners'
 ]
 
 LINK_FONT = Font(color='0563C1', underline='single')
@@ -47,7 +49,9 @@ def append_listing_row(fields, message_link, path=EXCEL_PATH):
         fields.get('bathrooms'),
         fields.get('parking'),
         fields.get('sorting_price'),
-        message_link
+        message_link,
+        fields.get('listing_url'),
+        fields.get('open_to_foreigners')
     ])
 
     if message_link:

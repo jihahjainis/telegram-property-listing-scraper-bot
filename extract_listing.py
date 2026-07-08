@@ -27,18 +27,21 @@ EXTRACTION_SCHEMA = {
         'sorting_price': {'anyOf': [{'type': 'number'}, {'type': 'null'}]},
         'contact_name': {'anyOf': [{'type': 'string'}, {'type': 'null'}]},
         'contact_phone': {'anyOf': [{'type': 'string'}, {'type': 'null'}]},
+        'listing_url': {'anyOf': [{'type': 'string'}, {'type': 'null'}]},
+        'open_to_foreigners': {'anyOf': [{'type': 'boolean'}, {'type': 'null'}]}
     },
     'required': [
         'property_name', 'area', 'state', 'property_type', 'size_sqft', 'rental_price',
         'bedrooms', 'bathrooms', 'parking', 'sorting_price', 'contact_name', 'contact_phone',
+        'listing_url', 'open_to_foreigners'
     ],
     'additionalProperties': False,
 }
 
 EXTRACTION_PROMPT = (
     'Extract the property name, area, Malaysian state, property type, size_sqft, rental price, number of '
-    'bedrooms, number of bathrooms, number of parking spaces, sorting price, contact name, and contact phone '
-    'number from this rental listing.\n'
+    'bedrooms, number of bathrooms, number of parking spaces, sorting price, contact name, contact phone '
+    'number, listing url and foreigner availability from this rental listing.\n'
     f'For property type, choose the closest match from exactly these options: {", ".join(PROPERTY_TYPES)}. '
     'Never leave it null; pick the closest match even if the listing is not explicit (e.g. "room for rent" is '
     '"room", a house or "banglo" is "landed").\n'
@@ -48,6 +51,12 @@ EXTRACTION_PROMPT = (
     'Only use null if there is truly no location information to infer from.\n'
     'For sorting price, convert every rental price into a numeric value (e.g., "RM1,200" becomes 1200, RM2,400 / month becomes 2400). '
     'For contact name and contact phone, extract the listing owner/agent\'s name and phone number if mentioned. '
+    'For listing_url, extract the Telegram link or any direct listing URL if provided.\n'
+    'For open_to_foreigners, extract a boolean (true/false) based on the listing\'s stated eligibility. '
+    'Look for phrases like "Open for All Locals & Foreigners", "Locals Only", "Foreigners Welcome", etc. '
+    'If the listing explicitly states "All Locals & Foreigners" or similar, set to true. '
+    'If it says "Locals Only" or excludes foreigners, set to false. '
+    'If eligibility is not mentioned, default to true. '
     'Use null for any other field that is not mentioned or unclear. Do not guess beyond what is instructed above.\n\n'
 )
 
